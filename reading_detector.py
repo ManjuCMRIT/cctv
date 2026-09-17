@@ -4,7 +4,7 @@ import math
 
 class ReadingDetector:
 
-    def __init__(self, model_path="yolov8n-pose.pt", conf=0.35):
+    def __init__(self, model_path="yolov8n-pose.pt", conf=0.30):
         self.model = YOLO(model_path)
         self.conf = conf
 
@@ -14,23 +14,24 @@ class ReadingDetector:
             (p1[1] - p2[1]) ** 2
         )
 
-    def is_reading(self, keypoints, box):
+    def is_reading(self, keypoints):
 
-        # COCO keypoint indexes
-        # 0 nose
-        # 5 left shoulder
-        # 6 right shoulder
-        # 7 left elbow
-        # 8 right elbow
-        # 9 left wrist
-        # 10 right wrist
-        # 11 left hip
-        # 12 right hip
+        # COCO pose keypoints
+        # 0  = nose
+        # 5  = left shoulder
+        # 6  = right shoulder
+        # 7  = left elbow
+        # 8  = right elbow
+        # 9  = left wrist
+        # 10 = right wrist
+        # 11 = left hip
+        # 12 = right hip
 
         required = [0, 5, 6, 9, 10, 11, 12]
 
+        # Check keypoint confidence
         for idx in required:
-            if keypoints[idx][2] < 0.3:
+            if keypoints[idx][2] < 0.25:
                 return False
 
         nose = keypoints[0][:2]
@@ -44,35 +45,132 @@ class ReadingDetector:
         left_hip = keypoints[11][:2]
         right_hip = keypoints[12][:2]
 
+        # -----------------------------------------
+        # Shoulder and hip reference points
+        # -----------------------------------------
+
+        shoulder_x = (
+            left_shoulder[0] +
+            right_shoulder[0]
+        ) / 2
+
         shoulder_y = (
-            left_shoulder[1] + right_shoulder[1]
+            left_shoulder[1] +
+            right_shoulder[1]
+        ) / 2
+
+        hip_x = (
+            left_hip[0] +
+            right_hip[0]
         ) / 2
 
         hip_y = (
-            left_hip[1] + right_hip[1]
+            left_hip[1] +
+            right_hip[1]
         ) / 2
 
-        # Height of person's upper body
         body_height = abs(hip_y - shoulder_y)
 
-        if body_height < 20:
+        if body_height < 30:
             return False
 
-        # Head should be tilted/downward.
-        # Nose being sufficiently below the shoulder line
-        # is a simple first approximation.
-        head_down = nose[1] > shoulder_y + body_height * 0.10
+        # -----------------------------------------
+        # 1. Head position
+        # -----------------------------------------
 
-        # Hands should be relatively close to the body.
-        wrist_left_distance = self.distance(left_wrist, left_hip)
-        wrist_right_distance = self.distance(right_wrist, right_hip)
+        # How far the nose is below/above shoulders
+        nose_vertical_ratio = (
+            nose[1] - shoulder_y
+        ) / body_height
 
-        hands_near_body = (
-            wrist_left_distance < body_height * 1.2
-            and wrist_right_distance < body_height * 1.2
+        # A reading posture normally brings the
+        # head closer toward the chest.
+        #
+        # We use a MUCH more forgiving threshold
+        # than the previous version.
+
+        head_lowered = nose_vertical_ratio > -0.45
+
+        # -----------------------------------------
+        # 2. Nose should be roughly centered
+        # -----------------------------------------
+
+        shoulder_width = abs(
+            right_shoulder[0] -
+            left_shoulder[0]
         )
 
-        return head_down and hands_near_body
+        if shoulder_width < 20:
+            return False
+
+        horizontal_head_offset = abs(
+            nose[0] - shoulder_x
+        )
+
+        head_centered = (
+            horizontal_head_offset <
+            shoulder_width * 0.8
+        )
+
+        # -----------------------------------------
+        # 3. Hands should be below shoulders
+        # -----------------------------------------
+
+        left_hand_down = (
+            left_wrist[1] >
+            shoulder_y
+        )
+
+        right_hand_down = (
+            right_wrist[1] >
+            shoulder_y
+        )
+
+        hands_down = (
+            left_hand_down or
+            right_hand_down
+        )
+
+        # -----------------------------------------
+        # 4. Hands should not be extremely far away
+        # -----------------------------------------
+
+        left_hand_distance = self.distance(
+            left_wrist,
+            (shoulder_x, shoulder_y)
+        )
+
+        right_hand_distance = self.distance(
+            right_wrist,
+            (shoulder_x, shoulder_y)
+        )
+
+        hands_reasonably_close = (
+            left_hand_distance < body_height * 1.5
+            or
+            right_hand_distance < body_height * 1.5
+        )
+
+        # -----------------------------------------
+        # Final decision
+        # -----------------------------------------
+
+        score = 0
+
+        if head_lowered:
+            score += 1
+
+        if head_centered:
+            score += 1
+
+        if hands_down:
+            score += 1
+
+        if hands_reasonably_close:
+            score += 1
+
+        # Need 3 out of 4 conditions
+        return score >= 3
 
     def process_frame(self, frame):
 
@@ -92,21 +190,37 @@ class ReadingDetector:
 
         for i in range(len(boxes)):
 
-            box_conf = float(boxes.conf[i])
+            confidence = float(boxes.conf[i])
 
-            if box_conf < self.conf:
+            if confidence < self.conf:
                 continue
 
-            box = tuple(boxes.xyxy[i].tolist())
+            # Only person class
+            class_id = int(boxes.cls[i])
+
+            if class_id != 0:
+                continue
+
+            x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+
+            # -----------------------------------------
+            # Ignore very small detections
+            # -----------------------------------------
+
+            box_width = x2 - x1
+            box_height = y2 - y1
+
+            if box_width < 80 or box_height < 120:
+                continue
 
             points = keypoints.data[i].cpu().numpy()
 
-            reading = self.is_reading(points, box)
+            reading = self.is_reading(points)
 
             detections.append({
-                "box": box,
+                "box": (x1, y1, x2, y2),
                 "reading": reading,
-                "confidence": box_conf
+                "confidence": confidence
             })
 
         return detections
