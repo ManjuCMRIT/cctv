@@ -63,6 +63,7 @@ if uploaded is not None:
         dt = frame_skip / fps
         frame_idx = 0
         last_annotations = []
+        last_gadget_boxes = []
         start_time = time.time()
         debug_rows = []
         processed_count = 0
@@ -76,16 +77,24 @@ if uploaded is not None:
             if frame_idx % frame_skip == 0:
                 last_annotations = tracker.process_frame(frame, dt)
                 processed_count += 1
-                gadgets_this_frame = getattr(tracker, "last_gadget_detections", [])
-                if gadgets_this_frame:
+                last_gadget_boxes = getattr(tracker, "last_gadget_detections", [])
+                if last_gadget_boxes:
                     gadget_seen_count += 1
                 if show_debug:
                     t_sec = frame_idx / fps
-                    if gadgets_this_frame:
-                        for _box, label, score in gadgets_this_frame:
+                    if last_gadget_boxes:
+                        for _box, label, score in last_gadget_boxes:
                             debug_rows.append(f"t={t_sec:.2f}s — {label} (conf {score:.2f})")
                     else:
                         debug_rows.append(f"t={t_sec:.2f}s — no gadget detected")
+
+            # Draw the phone/laptop boxes themselves (blue) so you can see
+            # exactly what's being picked up, separate from the person boxes.
+            for gbox, glabel, gscore in last_gadget_boxes:
+                gx1, gy1, gx2, gy2 = map(int, gbox)
+                cv2.rectangle(frame, (gx1, gy1), (gx2, gy2), (255, 140, 0), 2)
+                cv2.putText(frame, f"{glabel} {gscore:.2f}", (gx1, max(20, gy1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 0), 2)
 
             for a in last_annotations:
                 x1, y1, x2, y2 = map(int, a["box"])
