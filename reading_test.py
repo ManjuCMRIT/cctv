@@ -21,7 +21,7 @@ if uploaded is not None:
     input_path = "reading_input.mp4"
 
     with open(input_path, "wb") as f:
-        f.write(uploaded.read())
+        f.write(uploaded.getbuffer())
 
     if st.button("▶ Detect Reading"):
 
@@ -29,27 +29,37 @@ if uploaded is not None:
 
         cap = cv2.VideoCapture(input_path)
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        if not cap.isOpened():
+            st.error("Unable to open the uploaded video.")
+            st.stop()
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        if fps <= 0:
+            fps = 25
+
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        output_path = "reading_output.mp4"
+        total_frames = int(
+            cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        )
+
+        output_path = "reading_annotated.mp4"
+
+        # MP4 video writer
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
         writer = cv2.VideoWriter(
             output_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
+            fourcc,
             fps,
             (width, height)
         )
 
         progress = st.progress(0)
 
-        total_frames = int(
-            cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        )
-
         frame_number = 0
-
         reading_frames = 0
         total_people_frames = 0
 
@@ -60,8 +70,11 @@ if uploaded is not None:
             if not ret:
                 break
 
-            # Process every frame initially
             detections = detector.process_frame(frame)
+
+            # Count detections
+            if len(detections) > 0:
+                total_people_frames += len(detections)
 
             for detection in detections:
 
@@ -72,28 +85,37 @@ if uploaded is not None:
 
                 reading = detection["reading"]
 
-                total_people_frames += 1
-
                 if reading:
+
                     reading_frames += 1
 
                     label = "READING"
 
+                    # Bounding box
                     cv2.rectangle(
                         frame,
                         (x1, y1),
                         (x2, y2),
                         (0, 255, 0),
-                        2
+                        3
+                    )
+
+                    # Label background
+                    cv2.rectangle(
+                        frame,
+                        (x1, max(0, y1 - 35)),
+                        (x1 + 150, y1),
+                        (0, 255, 0),
+                        -1
                     )
 
                     cv2.putText(
                         frame,
                         label,
-                        (x1, max(20, y1 - 10)),
+                        (x1 + 5, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
-                        (0, 255, 0),
+                        (0, 0, 0),
                         2
                     )
 
@@ -106,19 +128,28 @@ if uploaded is not None:
                         (x1, y1),
                         (x2, y2),
                         (0, 0, 255),
-                        2
+                        3
+                    )
+
+                    cv2.rectangle(
+                        frame,
+                        (x1, max(0, y1 - 35)),
+                        (x1 + 190, y1),
+                        (0, 0, 255),
+                        -1
                     )
 
                     cv2.putText(
                         frame,
                         label,
-                        (x1, max(20, y1 - 10)),
+                        (x1 + 5, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
-                        (0, 0, 255),
+                        (255, 255, 255),
                         2
                     )
 
+            # Write annotated frame
             writer.write(frame)
 
             frame_number += 1
@@ -132,20 +163,47 @@ if uploaded is not None:
         cap.release()
         writer.release()
 
-        st.success("Reading detection completed.")
+        progress.empty()
 
-        st.subheader("Result")
+        st.success("Detection completed successfully.")
 
-        st.video(output_path)
+        # --------------------------------
+        # Calculate reading percentage
+        # --------------------------------
 
         if total_people_frames > 0:
 
-            percentage = (
+            reading_percentage = (
                 reading_frames /
                 total_people_frames
             ) * 100
 
-            st.metric(
-                "Reading-like frames",
-                f"{percentage:.1f}%"
+        else:
+
+            reading_percentage = 0.0
+
+        # --------------------------------
+        # Show result
+        # --------------------------------
+
+        st.subheader("Annotated Result")
+
+        st.video(output_path)
+
+        st.metric(
+            "Reading-like frames",
+            f"{reading_percentage:.1f}%"
+        )
+
+        # --------------------------------
+        # Download button
+        # --------------------------------
+
+        with open(output_path, "rb") as video_file:
+
+            st.download_button(
+                label="⬇️ Download Annotated Video",
+                data=video_file,
+                file_name="reading_detection_annotated.mp4",
+                mime="video/mp4"
             )
