@@ -42,6 +42,17 @@ def box_center(box):
     return (x1 + x2) / 2, (y1 + y2) / 2
 
 
+def centroid_distance(box_a, box_b):
+    ax, ay = box_center(box_a)
+    bx, by = box_center(box_b)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def box_diag(box):
+    x1, y1, x2, y2 = box
+    return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+
 def point_in_box(point, box, margin=0.0):
     x, y = point
     x1, y1, x2, y2 = box
@@ -51,20 +62,32 @@ def point_in_box(point, box, margin=0.0):
 class GadgetUseTracker:
     """Runs YOLO on frames and keeps per-child gadget-use state over time."""
 
-    def __init__(self, model_path="yolov8n.pt", conf=0.35, match_iou=0.3):
+    def __init__(self, model_path="yolov8n.pt", conf=0.35, match_iou=0.15,
+                 match_centroid_ratio=0.5):
         self.model = YOLO(model_path)
         self.conf = conf
         self.match_iou = match_iou
+        # A candidate also counts as a match if its box center moved less
+        # than (match_centroid_ratio * previous box diagonal) since the last
+        # frame - this catches cases where IoU dips (angle/lean/occlusion)
+        # but it's clearly still the same person, so their gadget-use timer
+        # keeps accumulating instead of resetting on a fresh id.
+        self.match_centroid_ratio = match_centroid_ratio
         self.tracks: dict[int, TrackedPerson] = {}
         self._next_id = 1
 
     def _match_or_create_track(self, box):
-        best_id, best_iou = None, 0.0
+        best_id, best_score = None, 0.0
         for tid, tp in self.tracks.items():
-            score = iou(tp.box, box)
-            if score > best_iou:
-                best_id, best_iou = tid, score
-        if best_id is not None and best_iou >= self.match_iou:
+            iou_score = iou(tp.box, box)
+            dist = centroid_distance(tp.box, box)
+            diag = box_diag(tp.box) or 1.0
+            centroid_ok = dist <= self.match_centroid_ratio * diag
+            if iou_score >= self.match_iou or centroid_ok:
+                # prefer the candidate with the best IoU among acceptable matches
+                if iou_score > best_score or best_id is None:
+                    best_id, best_score = tid, iou_score
+        if best_id is not None:
             return best_id
         new_id = self._next_id
         self._next_id += 1
@@ -73,17 +96,24 @@ class GadgetUseTracker:
 
     def process_frame(self, frame, dt):
         """Run detection on one BGR frame. dt = seconds this frame represents."""
-        results = self.model.predict(frame, conf=self.conf, verbose=False)[0]
+        # Run at a lower confidence for gadget classes specifically -- small,
+        # partly-occluded phones are the main source of missed detections,
+        # and a missed detection here is what makes duration look lower
+        # than what you actually see in the video.
+        results = self.model.predict(frame, conf=min(self.conf, 0.2), verbose=False)[0]
 
         person_boxes = []
         gadget_boxes = []
         for box in results.boxes:
             cls_id = int(box.cls[0])
+            score = float(box.conf[0])
             xyxy = tuple(box.xyxy[0].tolist())
-            if cls_id == PERSON_CLASS:
+            if cls_id == PERSON_CLASS and score >= self.conf:
                 person_boxes.append(xyxy)
             elif cls_id in GADGET_CLASSES:
-                gadget_boxes.append((xyxy, GADGET_CLASSES[cls_id]))
+                gadget_boxes.append((xyxy, GADGET_CLASSES[cls_id], score))
+
+        self.last_gadget_detections = gadget_boxes  # for debug/inspection
 
         annotations = []
         for pbox in person_boxes:
@@ -92,7 +122,7 @@ class GadgetUseTracker:
             tp.box = pbox
 
             active, gadget_label = False, None
-            for gbox, label in gadget_boxes:
+            for gbox, label, _score in gadget_boxes:
                 if point_in_box(box_center(gbox), pbox, margin=20):
                     active, gadget_label = True, label
                     break
