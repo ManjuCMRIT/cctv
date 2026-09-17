@@ -27,10 +27,17 @@ st.caption(
 with st.sidebar:
     st.header("Settings")
     frame_skip = st.slider(
-        "Frame skip (higher = faster, less smooth)", 1, 5, 2,
-        help="Process every Nth frame. Raise this if processing feels slow.",
+        "Frame skip (higher = faster, less smooth)", 1, 5, 1,
+        help="Process every Nth frame. Raise this only if processing feels "
+             "too slow -- lower values catch brief gadget-use moments better.",
     )
-    conf = st.slider("Detection confidence", 0.1, 0.9, 0.35, 0.05)
+    conf = st.slider(
+        "Detection confidence", 0.1, 0.9, 0.2, 0.05,
+        help="Lower catches more (including small/partly-hidden phones) but "
+             "risks more false positives. Raise if you see boxes on things "
+             "that aren't actually phones/laptops.",
+    )
+    show_debug = st.checkbox("Show per-frame detection debug info", value=False)
 
 uploaded = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "mkv"])
 
@@ -57,6 +64,9 @@ if uploaded is not None:
         frame_idx = 0
         last_annotations = []
         start_time = time.time()
+        debug_rows = []
+        processed_count = 0
+        gadget_seen_count = 0
 
         while True:
             ok, frame = cap.read()
@@ -65,6 +75,17 @@ if uploaded is not None:
 
             if frame_idx % frame_skip == 0:
                 last_annotations = tracker.process_frame(frame, dt)
+                processed_count += 1
+                gadgets_this_frame = getattr(tracker, "last_gadget_detections", [])
+                if gadgets_this_frame:
+                    gadget_seen_count += 1
+                if show_debug:
+                    t_sec = frame_idx / fps
+                    if gadgets_this_frame:
+                        for _box, label, score in gadgets_this_frame:
+                            debug_rows.append(f"t={t_sec:.2f}s — {label} (conf {score:.2f})")
+                    else:
+                        debug_rows.append(f"t={t_sec:.2f}s — no gadget detected")
 
             for a in last_annotations:
                 x1, y1, x2, y2 = map(int, a["box"])
@@ -99,5 +120,16 @@ if uploaded is not None:
                 st.metric(f"Child {tid}", f"{tp.gadget_seconds:.1f}s")
         else:
             st.info("No people detected in this video.")
+
+        st.caption(
+            f"Processed {processed_count} frames; a phone/laptop was detected "
+            f"in {gadget_seen_count} of them ({gadget_seen_count/max(processed_count,1)*100:.0f}%). "
+            "If this is much lower than what you visually see in the video, "
+            "try lowering 'Detection confidence' further."
+        )
+
+        if show_debug:
+            with st.expander(f"Per-frame detections ({len(debug_rows)} rows)"):
+                st.text("\n".join(debug_rows) if debug_rows else "No frames processed.")
 else:
     st.info("Upload a video to get started. A 10-30 second clip works well for testing.")
