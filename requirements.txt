@@ -1,6 +1,6 @@
 streamlit
 numpy==1.26.4
-opencv-python-headless
+opencv-python-headless==4.10.0.84
 insightface==0.7.3
 onnxruntime==1.16.3
 firebase-admin
